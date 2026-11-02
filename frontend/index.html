@@ -1,0 +1,625 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Multi Profile Manager - Simultaneous Video Player</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-[#15171c] text-slate-200 flex min-h-screen font-sans">
+  <!-- Toast Notification System -->
+  <div id="toast" class="fixed top-5 right-5 z-50 transition-all duration-300 opacity-0 pointer-events-none translate-y-[-10px] max-w-md bg-[#1f232b] border border-blue-500/40 text-slate-100 px-4 py-3 rounded-xl shadow-2xl flex items-start gap-3">
+    <span id="toastIcon" class="text-xl">ℹ️</span>
+    <div class="flex-1">
+      <div id="toastTitle" class="font-bold text-xs text-white">Notification</div>
+      <div id="toastMsg" class="text-xs text-slate-300 mt-0.5 whitespace-pre-line"></div>
+    </div>
+  </div>
+
+  <aside id="sb" class="w-56 bg-[#1b1e25] p-3 space-y-1 transition-all overflow-hidden flex flex-col justify-between shrink-0 border-r border-slate-800">
+    <div>
+      <div class="flex items-center justify-between mb-4 px-2">
+        <span class="font-bold text-white tracking-wide text-sm">Profile Manager</span>
+        <button onclick="sb.classList.toggle('w-56');sb.classList.toggle('w-16')" class="text-xs text-slate-500 hover:text-slate-300">☰</button>
+      </div>
+      <nav id="nav" class="space-y-1"></nav>
+    </div>
+    <div class="p-2 border-t border-slate-800 space-y-2">
+      <button onclick="stopAllProfiles()" class="w-full text-center px-2 py-1.5 rounded-lg bg-rose-900/60 hover:bg-rose-800 text-rose-200 text-xs font-medium transition cursor-pointer">
+        ⏹ Stop All Profiles
+      </button>
+      <div class="text-[11px] text-slate-500 text-center">
+        v0.1 &middot; 127.0.0.1:4000
+      </div>
+    </div>
+  </aside>
+
+  <main class="flex-1 p-6 overflow-auto">
+    <div id="v"></div>
+  </main>
+
+<script>
+const TABS = ['Dashboard', 'Profiles', 'Video Testing', 'Session Manager', 'Logs', 'Resources', 'Settings'];
+let tab = 'Dashboard', P = [], R = {}, sel = new Set(), q = '', watchedId = null, liveTimer = null, liveInfo = {};
+let allMuted = true, currentMuted = false;
+
+function notify(title, msg, icon = '🚀', duration = 6000) {
+  const t = document.getElementById('toast');
+  document.getElementById('toastIcon').textContent = icon;
+  document.getElementById('toastTitle').textContent = title;
+  document.getElementById('toastMsg').textContent = msg;
+  t.classList.remove('opacity-0', 'pointer-events-none', 'translate-y-[-10px]');
+  clearTimeout(liveTimer);
+  liveTimer = setTimeout(() => {
+    t.classList.add('opacity-0', 'pointer-events-none', 'translate-y-[-10px]');
+  }, duration);
+}
+
+const api = async (u, m = 'GET', b) => {
+  const r = await fetch('/api' + u, {
+    method: m,
+    headers: { 'content-type': 'application/json' },
+    body: b ? JSON.stringify(b) : undefined
+  });
+  const j = r.headers.get('content-type')?.includes('json') ? await r.json() : {};
+  if (!r.ok) {
+    notify('Notice', j.error || r.statusText, '⚠️', 5000);
+    throw j;
+  }
+  return j;
+};
+
+const card = 'bg-[#1f232b] rounded-2xl p-4 shadow border border-slate-800/80';
+const btn = 'px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-xs font-medium transition cursor-pointer';
+const btn2 = 'px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-200 text-xs font-medium transition cursor-pointer';
+const btnEmerald = 'px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-medium transition cursor-pointer';
+const btnAmber = 'px-3 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-500 text-white text-xs font-medium transition cursor-pointer';
+const btnPlay = 'px-3.5 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-500 text-white text-xs font-bold transition cursor-pointer shadow';
+
+nav.innerHTML = TABS.map(t => `<button class="block w-full text-left px-3 py-2 rounded-lg hover:bg-slate-700/60 text-sm whitespace-nowrap transition ${tab === t ? 'bg-blue-600/20 text-blue-400 font-semibold' : 'text-slate-300'}" onclick="setTab('${t}')">${t}</button>`).join('');
+
+function setTab(t) {
+  tab = t;
+  nav.querySelectorAll('button').forEach((b, i) => {
+    b.className = `block w-full text-left px-3 py-2 rounded-lg hover:bg-slate-700/60 text-sm whitespace-nowrap transition ${TABS[i] === tab ? 'bg-blue-600/20 text-blue-400 font-semibold' : 'text-slate-300'}`;
+  });
+  draw();
+}
+
+async function load() {
+  try {
+    P = await api('/profiles');
+    R = await api('/system/resources');
+    if (!watchedId && P.length > 0) {
+      const runningOne = P.find(p => p.running);
+      watchedId = runningOne ? runningOne.id : P[0].id;
+    }
+    draw();
+  } catch (e) {}
+}
+
+async function updateLivePreview() {
+  if (tab !== 'Dashboard' || !watchedId) return;
+  const p = P.find(x => x.id === watchedId);
+  const img = document.getElementById('liveScreen');
+  const infoEl = document.getElementById('liveInfo');
+  if (!img) return;
+
+  if (p && p.running) {
+    try {
+      const info = await api(`/profiles/${watchedId}/page-info`);
+      liveInfo = info;
+      if (infoEl) {
+        infoEl.innerHTML = `<span class="text-white font-medium">${info.title || 'Untitled Page'}</span> &middot; <span class="text-slate-400 text-xs font-mono">${info.url || 'about:blank'}</span>`;
+      }
+      img.src = `/api/profiles/${watchedId}/screenshot?t=${Date.now()}`;
+      img.classList.remove('opacity-40');
+    } catch {
+      img.classList.add('opacity-40');
+    }
+  }
+}
+
+function watchProfile(id) {
+  watchedId = id;
+  setTab('Dashboard');
+}
+
+async function toggleProfileMute(id) {
+  const current = await api(`/profiles/${id}/mute`);
+  const next = !current.muted;
+  await api(`/profiles/${id}/mute`, 'POST', { muted: next });
+  notify('Audio Control', `${id} is now ${next ? 'MUTED' : 'UNMUTED'}.`, next ? '🔇' : '🔊', 2500);
+  load();
+}
+
+async function toggleMuteCurrent() {
+  if (!watchedId) return;
+  currentMuted = !currentMuted;
+  await api(`/profiles/${watchedId}/mute`, 'POST', { muted: currentMuted });
+  const btnM = document.getElementById('btnMuteCurrent');
+  if (btnM) {
+    btnM.innerHTML = currentMuted ? '🔇 Muted' : '🔊 Sound On';
+    btnM.className = currentMuted ? 'px-3 py-1.5 rounded-lg bg-amber-700 text-white text-xs font-medium cursor-pointer' : btn2;
+  }
+  notify('Audio Control', currentMuted ? 'Selected profile audio is MUTED.' : 'Selected profile audio is UNMUTED.', currentMuted ? '🔇' : '🔊', 2500);
+}
+
+async function toggleMuteAll() {
+  allMuted = !allMuted;
+  await api('/video/mute-all', 'POST', { muted: allMuted });
+  const btnM = document.getElementById('btnMuteAll');
+  if (btnM) {
+    btnM.innerHTML = allMuted ? '🔇 All Muted' : '🔊 All Sound On';
+  }
+  notify('Mute All', allMuted ? 'All playing profiles are now MUTED.' : 'All playing profiles now have SOUND ON.', allMuted ? '🔇' : '🔊', 3000);
+}
+
+async function playAllSimultaneous() {
+  if (!sel.size) return notify('Select Profiles First', 'Please check at least one profile checkbox to play simultaneously.', '⚠️', 4000);
+  let url = document.getElementById('vu_profiles')?.value?.trim() || document.getElementById('vu')?.value?.trim() || '';
+  const muted = document.getElementById('muteAllCheckbox')?.checked ?? allMuted;
+
+  if (!url) {
+    const anyHasUrl = [...sel].some(id => P.find(p => p.id === id)?.test_url);
+    if (!anyHasUrl) {
+      url = prompt('Enter YouTube Video URL to play in all selected profiles:', 'https://www.youtube.com/watch?v=dQw4w9WgXcQ') || '';
+      if (!url) return;
+    }
+  }
+
+  notify('Playing All at Same Time', `Launching and playing video in ${sel.size} profiles simultaneously...`, '🎬', 6000);
+  try {
+    const res = await api('/video/play-simultaneous', 'POST', { profile_ids: [...sel], url: url || undefined, muted });
+    notify('All Profiles Playing!', `${res.played} profiles are now playing videos at the exact same time!`, '✅', 6000);
+    setTimeout(load, 1500);
+  } catch (err) {}
+}
+
+async function stopAllProfiles() {
+  await api('/scheduler/stop', 'POST').catch(() => 0);
+  notify('Stopping All', 'Closing all running profiles and stopping video audio...', '⏹', 4000);
+  setTimeout(load, 1500);
+}
+
+async function handleScreenClick(e) {
+  if (!watchedId) return;
+  const img = e.target;
+  const rect = img.getBoundingClientRect();
+  const naturalW = img.naturalWidth || 1280;
+  const naturalH = img.naturalHeight || 720;
+  const scaleX = naturalW / rect.width;
+  const scaleY = naturalH / rect.height;
+  const x = Math.round((e.clientX - rect.left) * scaleX);
+  const y = Math.round((e.clientY - rect.top) * scaleY);
+
+  notify('Click Sent', `Clicked browser at (${x}, ${y})`, '🎯', 1500);
+  try {
+    await api(`/profiles/${watchedId}/interact`, 'POST', { action: 'click', x, y });
+    setTimeout(updateLivePreview, 400);
+  } catch (err) {}
+}
+
+async function sendType() {
+  if (!watchedId) return;
+  const input = document.getElementById('quickType');
+  const text = input.value;
+  if (!text) return;
+  notify('Typing', `Typing into active input field...`, '⌨️', 2000);
+  try {
+    await api(`/profiles/${watchedId}/interact`, 'POST', { action: 'type', text });
+    input.value = '';
+    setTimeout(updateLivePreview, 500);
+  } catch (err) {}
+}
+
+async function sendPress(key) {
+  if (!watchedId) return;
+  notify('Key Sent', `Pressed ${key}`, '↵', 1500);
+  try {
+    await api(`/profiles/${watchedId}/interact`, 'POST', { action: 'press', key });
+    setTimeout(updateLivePreview, 600);
+  } catch (err) {}
+}
+
+async function playVideo(id) {
+  try {
+    notify('Playing Video', `Opening and auto-playing video in ${id}...`, '▶️', 4000);
+    const res = await api(`/profiles/${id}/play-video`, 'POST');
+    notify('Video Playing', res.message || 'Video playback started!', '🎬', 5000);
+    setTimeout(load, 1500);
+  } catch (e) {}
+}
+
+async function openGoogleLogin(id) {
+  try {
+    notify('Opening Google Login', `Opening Google Sign-in for ${id}...`, '🌐', 5000);
+    await api(`/profiles/${id}/google-login`, 'POST');
+    notify('Google Sign-In Ready', `Google Sign-in page is loaded.\nUse the input bar below to type your Gmail and click "Type into Browser" & "Enter / Next"!`, '🔑', 8000);
+    setTimeout(load, 1500);
+  } catch (err) {}
+}
+
+async function markLoggedIn(id, val) {
+  await api(`/profiles/${id}/mark-logged-in`, 'POST', { logged_in: val });
+  notify(val ? 'Session Saved' : 'Marked Logout', val ? `${id} is marked as logged in.` : `${id} marked as needing login.`, val ? '✅' : '⚪', 4000);
+  load();
+}
+
+async function assignToProfiles() {
+  const url = document.getElementById('vu_profiles')?.value?.trim();
+  if (!url) return notify('URL Required', 'Please enter a video URL first.', '⚠️', 3000);
+  if (!sel.size) return notify('Select Profiles', 'Please select which profiles to assign this URL to.', '⚠️', 3000);
+  await api('/video/assign', 'POST', { url, profile_ids: [...sel] });
+  notify('Assigned', `URL assigned to ${sel.size} profiles!`, '✅', 3000);
+  load();
+}
+
+async function draw() {
+  let h = '';
+  const run = P.filter(p => p.running).length;
+
+  const stat = (a, b) => `<div class="${card}"><div class="text-slate-400 text-xs mb-1">${a}</div><div class="text-2xl font-bold text-blue-400">${b}</div></div>`;
+  const stats = `<div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-5">
+    ${stat('Total Profiles', P.length)}
+    ${stat('Active Playing', run)}
+    ${stat('Stopped', P.length - run)}
+    ${stat('Need Login', P.filter(p => p.needs_login).length)}
+    ${stat('Failed', P.filter(p => p.status === 'failed').length)}
+    ${stat('CPU Usage', R.cpuPercent + '%')}
+    ${stat('Available RAM', R.availableRamMB + ' MB (' + R.ramPercent + '% used)')}
+    ${stat('Diagnostics Queued', R.queued + ' / ' + R.runningTests)}
+  </div>`;
+
+  if (tab === 'Dashboard' || tab === 'Resources') {
+    const watched = P.find(x => x.id === watchedId) || P[0] || null;
+    const isRun = watched ? watched.running : false;
+
+    // Running Profiles Bar (Quick Switcher)
+    const runningList = P.filter(p => p.running);
+    const runningBar = runningList.length > 0 ? `
+      <div class="bg-slate-900/80 border border-slate-800 p-2.5 rounded-xl mb-3 flex items-center gap-2 overflow-x-auto text-xs">
+        <span class="text-emerald-400 font-bold flex items-center gap-1 shrink-0">
+          <span class="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-pulse"></span> Now Playing (${runningList.length}):
+        </span>
+        ${runningList.map(p => `
+          <button onclick="watchProfile('${p.id}')" class="px-2.5 py-1 rounded-lg border transition shrink-0 ${p.id === watchedId ? 'bg-blue-600 border-blue-400 text-white font-bold' : 'bg-slate-800 border-slate-700 text-slate-300 hover:bg-slate-700'}">
+            🟢 ${p.profile_name}
+          </button>
+        `).join('')}
+        <button onclick="stopAllProfiles()" class="ml-auto px-2 py-1 rounded-lg bg-rose-900/60 hover:bg-rose-800 text-rose-200 text-xs font-semibold shrink-0">
+          ⏹ Stop All
+        </button>
+      </div>
+    ` : '';
+
+    const liveViewer = `
+      ${runningBar}
+      <div class="${card} mb-6">
+        <div class="flex items-center justify-between pb-3 border-b border-slate-800 flex-wrap gap-2">
+          <div class="flex items-center gap-3">
+            <span class="w-3 h-3 rounded-full ${isRun ? 'bg-emerald-400 animate-pulse' : 'bg-slate-500'}"></span>
+            <b class="text-base text-white">Live Running Window View</b>
+            <select id="watchSel" onchange="watchedId=this.value;draw();updateLivePreview();" class="bg-slate-800 text-slate-200 border border-slate-700 rounded-lg px-2.5 py-1 text-xs">
+              ${P.map(p => `<option value="${p.id}" ${p.id === watchedId ? 'selected' : ''}>${p.running ? '🟢 ' : '⚪ '}${p.profile_name} (${p.id})</option>`).join('')}
+            </select>
+          </div>
+          <div class="flex items-center gap-2 flex-wrap">
+            <label class="text-xs text-slate-400 flex items-center gap-1 cursor-pointer">
+              <input type="checkbox" id="autoStream" checked> Live Stream (1.5s)
+            </label>
+            <button class="${btn2}" onclick="updateLivePreview()">📸 Refresh</button>
+            <button id="btnMuteCurrent" class="${btn2}" onclick="toggleMuteCurrent()">🔇 Mute Video</button>
+            <button id="btnMuteAll" class="${btn2}" onclick="toggleMuteAll()">🔇 Mute All</button>
+            ${isRun 
+              ? `<button class="${btn2}" onclick="act('${watchedId}','stop')">⏹ Stop</button>`
+              : `<button class="${btn}" onclick="act('${watchedId}','start')">▶ Start Profile</button>`
+            }
+            ${watched && watched.test_url ? `<button class="${btnPlay}" onclick="playVideo('${watchedId}')">▶ Play Video</button>` : ''}
+            <button class="${btnAmber}" onclick="openGoogleLogin('${watchedId}')">🔑 Google Sign-In</button>
+            ${watched && watched.needs_login
+              ? `<button class="${btnEmerald}" onclick="markLoggedIn('${watchedId}', true)">✓ I Have Signed In</button>`
+              : `<button class="${btn2}" onclick="markLoggedIn('${watchedId}', false)">Log Out</button>`
+            }
+          </div>
+        </div>
+
+        <div class="py-2 text-xs flex justify-between items-center text-slate-400" id="liveInfo">
+          ${isRun ? 'Loading window preview...' : `<span>${watched ? watched.profile_name : 'Selected profile'} is stopped. Click "Start Profile" or "Play Video" above.</span>`}
+        </div>
+
+        <div class="bg-black/90 rounded-xl overflow-hidden border border-slate-800 flex items-center justify-center min-h-[380px] relative">
+          ${isRun 
+            ? `<img id="liveScreen" onclick="handleScreenClick(event)" src="/api/profiles/${watchedId}/screenshot?t=${Date.now()}" class="w-full max-h-[560px] object-contain transition-opacity duration-300 cursor-crosshair select-none" title="Click anywhere on the screen to focus and click" alt="Live Browser Window" />`
+            : `<div class="text-center p-8 text-slate-500 space-y-2">
+                <div class="text-4xl">🖥️</div>
+                <div class="text-sm font-semibold text-slate-400">${watched ? watched.profile_name : 'No profile selected'} is not running</div>
+                <div class="text-xs text-slate-500">To view and interact with this window here, click <b>"Start Profile"</b> or <b>"Google Sign-In"</b>.</div>
+                <div class="pt-2 flex justify-center gap-2">
+                  <button class="${btn}" onclick="act('${watchedId}','start')">Start Profile</button>
+                  <button class="${btnAmber}" onclick="openGoogleLogin('${watchedId}')">Google Sign-In</button>
+                </div>
+               </div>`
+          }
+        </div>
+
+        ${isRun ? `
+          <div class="bg-slate-900/90 p-3 rounded-xl border border-slate-800 mt-3 space-y-2">
+            <div class="flex items-center justify-between text-xs">
+              <span class="text-blue-400 font-semibold flex items-center gap-1.5">
+                <span>⌨️</span> Interactive Remote Typing & Control
+              </span>
+              <span class="text-slate-400 text-[11px]">Click anywhere on the preview above to focus, then type below:</span>
+            </div>
+            <div class="flex gap-2 items-center flex-wrap">
+              <input id="quickType" placeholder="Type Gmail address, password, or search text here..." 
+                     class="bg-slate-800 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-white flex-1 min-w-[220px]"
+                     onkeydown="if(event.key==='Enter') sendType()">
+              <button class="${btn}" onclick="sendType()">
+                ⌨️ Type into Browser
+              </button>
+              <button class="${btnEmerald}" onclick="sendPress('Enter')">
+                ↵ Enter / Next
+              </button>
+              <button class="${btn2}" onclick="sendPress('Backspace')">
+                ⌫ Backspace
+              </button>
+              <button class="${btn2}" onclick="sendPress('Tab')">
+                ⇥ Tab
+              </button>
+            </div>
+          </div>
+        ` : ''}
+      </div>
+    `;
+
+    h = stats + liveViewer;
+  }
+
+  if (tab === 'Profiles' || tab === 'Session Manager') {
+    const simultaneousToolbar = `
+      <div class="${card} mb-4 border border-rose-500/40 bg-gradient-to-r from-rose-950/30 via-slate-900 to-slate-900">
+        <div class="flex items-center justify-between pb-3 border-b border-slate-800 flex-wrap gap-2">
+          <div>
+            <div class="font-bold text-white text-sm flex items-center gap-2">
+              <span class="text-rose-400">🎬</span> Play Selected Profiles at the SAME TIME
+            </div>
+            <div class="text-xs text-slate-400 mt-0.5">Plays all selected profiles simultaneously at the exact same moment.</div>
+          </div>
+          <div class="flex items-center gap-2 flex-wrap">
+            <label class="text-xs text-slate-300 flex items-center gap-1.5 cursor-pointer bg-slate-800 px-2.5 py-1.5 rounded-lg border border-slate-700">
+              <input type="checkbox" id="muteAllCheckbox" ${allMuted ? 'checked' : ''} onchange="allMuted=this.checked" class="rounded"> 🔇 Mute Audio
+            </label>
+            <button class="${btnPlay} text-xs px-4 py-2 font-bold" onclick="playAllSimultaneous()">
+              ▶ Play All Selected at Same Time
+            </button>
+            <button class="${btn2}" onclick="toggleMuteAll()">🔇 Mute/Unmute All</button>
+            <button class="${btn2}" onclick="bulk('start')">🌐 Start Selected</button>
+            <button class="${btn2}" onclick="bulk('stop')">⏹ Stop Selected</button>
+            <button class="px-2.5 py-1.5 rounded-lg bg-rose-900/60 hover:bg-rose-800 text-rose-200 text-xs font-semibold" onclick="stopAllProfiles()">⏹ Stop All</button>
+          </div>
+        </div>
+        <div class="pt-2 flex items-center gap-2 flex-wrap">
+          <span class="text-xs text-slate-400 shrink-0 font-medium">YouTube Video URL:</span>
+          <input id="vu_profiles" placeholder="https://www.youtube.com/watch?v=... (paste URL here to play on selected)" class="bg-slate-800 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-white flex-1 min-w-[240px]">
+          <button class="${btn}" onclick="assignToProfiles()">Assign to Selected</button>
+        </div>
+      </div>
+    `;
+
+    h = simultaneousToolbar + `
+    <div class="flex gap-2 mb-4 flex-wrap items-center">
+      <input placeholder="Search profiles..." value="${q}" oninput="q=this.value;draw()" class="bg-slate-800 border border-slate-700 rounded-lg px-3 py-1.5 text-sm w-64 text-white">
+      <button class="${btn}" onclick="add()">+ Add Profile</button>
+      <button class="${btn2}" onclick="api('/profiles/seed','POST').then(load)">Create up to 50</button>
+      <button class="${btn2}" onclick="selectAll()">Select All</button>
+      <button class="${btn2}" onclick="sel.clear();draw()">Deselect All</button>
+    </div>
+    <div class="grid md:grid-cols-2 xl:grid-cols-3 gap-3">` +
+    P.filter(p => (p.profile_name + p.id + (p.account_email || '')).toLowerCase().includes(q.toLowerCase())).map(p => `
+      <div class="${card} space-y-3">
+        <div class="flex justify-between items-start">
+          <label class="flex items-center gap-2 cursor-pointer">
+            <input type="checkbox" ${sel.has(p.id) ? 'checked' : ''} onchange="this.checked?sel.add('${p.id}'):sel.delete('${p.id}')" class="rounded">
+            <div>
+              <b class="text-white text-sm">${p.profile_name}</b>
+              <div class="text-[11px] text-slate-400 font-mono">${p.id}</div>
+            </div>
+          </label>
+          <span class="text-xs font-semibold px-2 py-0.5 rounded-full ${p.running ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30' : 'bg-slate-800 text-slate-400'}">
+            ${p.running ? '● Running' : 'Stopped'}
+          </span>
+        </div>
+
+        <div class="text-xs text-slate-400 space-y-1 bg-slate-900/60 p-2.5 rounded-xl border border-slate-800/80">
+          <div>Email: <span class="text-slate-300">${p.account_email || 'None configured'}</span></div>
+          <div>Video URL: <span class="text-slate-300 truncate block font-mono text-[11px]">${p.test_url || 'None assigned'}</span></div>
+          <div>Login: ${p.needs_login 
+            ? '<span class="text-amber-400 font-medium">Needs Google Sign-In</span>' 
+            : '<span class="text-emerald-400 font-medium">✓ Logged In (Permanent)</span>'
+          }</div>
+        </div>
+
+        <div class="flex gap-1.5 flex-wrap pt-1">
+          <button class="${btn}" onclick="act('${p.id}','start')">Start</button>
+          <button class="${btn2}" onclick="act('${p.id}','stop')">Stop</button>
+          <button class="${btnPlay}" onclick="playVideo('${p.id}')" title="Opens YouTube and plays video">▶ Play</button>
+          ${p.running ? `<button class="${btn2}" onclick="toggleProfileMute('${p.id}')">🔇 Mute</button>` : ''}
+          <button class="${btnAmber}" onclick="openGoogleLogin('${p.id}')" title="Opens Chrome for Google Sign-In">🔑 Login</button>
+          <button class="${btn2}" onclick="watchProfile('${p.id}')">👁 Watch</button>
+          ${p.needs_login
+            ? `<button class="${btnEmerald}" onclick="markLoggedIn('${p.id}', true)">✓ Logged</button>`
+            : `<button class="${btn2}" onclick="markLoggedIn('${p.id}', false)">Log Out</button>`
+          }
+          <button class="${btn2}" onclick="edit('${p.id}')">Edit</button>
+          <button class="px-2 py-1 rounded-lg bg-rose-900/40 hover:bg-rose-900/70 text-rose-300 text-xs transition" onclick="del('${p.id}')">Del</button>
+        </div>
+      </div>
+    `).join('') + '</div>';
+  }
+
+  if (tab === 'Video Testing') {
+    h = `
+    <!-- Multi-Profile Simultaneous Playback Card -->
+    <div class="${card} mb-5 space-y-4 border-2 border-rose-500/40 bg-gradient-to-r from-rose-950/30 via-slate-900 to-slate-900">
+      <div class="flex items-center justify-between border-b border-slate-800 pb-3 flex-wrap gap-2">
+        <div>
+          <h2 class="text-sm font-bold text-white flex items-center gap-2">
+            <span>🎬</span> Simultaneous Multi-Profile Video Player
+          </h2>
+          <p class="text-xs text-slate-400 mt-0.5">Plays all selected profiles <b>at the exact same time</b> simultaneously.</p>
+        </div>
+        <div class="flex items-center gap-3 flex-wrap">
+          <label class="text-xs text-slate-300 flex items-center gap-1.5 cursor-pointer bg-slate-800 px-3 py-1.5 rounded-lg border border-slate-700">
+            <input type="checkbox" id="muteAllCheckbox" ${allMuted ? 'checked' : ''} onchange="allMuted=this.checked" class="rounded"> 🔇 Mute Audio
+          </label>
+          <button class="${btnPlay} text-sm px-5 py-2 text-white font-bold" onclick="playAllSimultaneous()">
+            ▶ Play All Selected at Same Time
+          </button>
+          <button class="${btn2}" onclick="toggleMuteAll()">🔇 Mute/Unmute All</button>
+          <button class="px-3 py-1.5 rounded-lg bg-rose-900/70 hover:bg-rose-800 text-rose-200 text-xs font-semibold" onclick="stopAllProfiles()">⏹ Stop All</button>
+        </div>
+      </div>
+
+      <div class="space-y-2">
+        <label class="text-xs text-slate-400 block font-medium">YouTube Video URL:</label>
+        <div class="flex gap-2">
+          <input id="vu" placeholder="https://www.youtube.com/watch?v=..." class="bg-slate-800 border border-slate-700 rounded-lg px-3 py-1.5 flex-1 text-sm text-white">
+          <button class="${btn2}" onclick="vv()">Validate URL</button>
+          <button class="${btn}" onclick="va()">Assign URL to Selected</button>
+        </div>
+        <div id="vr" class="text-xs"></div>
+      </div>
+    </div>` +
+    P.filter(p => p.test_url).map(p => `
+      <div class="${card} mb-2 flex justify-between items-center text-sm flex-wrap gap-2">
+        <div>
+          <b>${p.profile_name}</b>: <span class="text-slate-400 text-xs font-mono">${p.test_url}</span>
+        </div>
+        <div class="flex gap-2">
+          <button class="${btnPlay}" onclick="playVideo('${p.id}')">▶ Play</button>
+          <button class="${btn2}" onclick="watchProfile('${p.id}')">👁 Watch Live</button>
+          <button class="${btn2}" onclick="vt('${p.id}')">Run Diagnostic</button>
+        </div>
+      </div>
+    `).join('') + '<div id="tr" class="mt-3"></div>';
+  }
+
+  if (tab === 'Logs') {
+    const L = await api('/logs');
+    h = `<div class="flex justify-between items-center mb-3">
+      <h2 class="text-sm font-semibold text-white">Activity Logs</h2>
+      <a class="${btn2}" href="/api/logs?format=csv">Export CSV</a>
+    </div>
+    <div class="${card} text-xs font-mono space-y-1 max-h-[70vh] overflow-auto">
+      ${L.map(l => `<div class="py-0.5 border-b border-slate-800/40"><span class="text-slate-500">${l.created_at}</span> &middot; <span class="text-blue-400">${l.profile_id || '-'}</span> <b>${l.event_type}</b>: <span class="text-slate-300">${l.description || ''}</span></div>`).join('')}
+    </div>`;
+  }
+
+  if (tab === 'Session Manager') {
+    const S = await api('/settings');
+    h = `<div class="${card} mb-4 flex gap-2 items-center text-sm flex-wrap">
+      Scheduled diagnostics every 
+      <select id="sm" class="bg-slate-800 border border-slate-700 rounded px-2 py-1 text-xs">
+        ${[5,6,7,8,9,10].map(n => `<option ${S.schedule_minutes == n ? 'selected' : ''}>${n}</option>`)}
+      </select> min 
+      <button class="${btn}" onclick="sch()">Enable</button>
+      <button class="${btn2}" onclick="api('/scheduler/pause','POST')">Pause</button>
+      <button class="${btn2}" onclick="api('/scheduler/resume','POST')">Resume</button>
+      <button class="${btn2}" onclick="api('/scheduler/stop','POST')">Stop All</button>
+    </div>` + h;
+  }
+
+  if (tab === 'Settings') {
+    const S = await api('/settings');
+    h = `<div class="${card} grid gap-3 max-w-xl text-sm">
+      <h2 class="text-sm font-semibold text-white mb-2">Application Settings</h2>
+      ${Object.keys(S).map(k => `
+        <label class="text-xs text-slate-400">
+          ${k}
+          <input data-k="${k}" value="${S[k]}" class="bg-slate-800 border border-slate-700 rounded-lg px-3 py-1.5 w-full text-white mt-1">
+        </label>
+      `).join('')}
+      <button class="${btn} mt-2 w-fit" onclick="saveS()">Save Settings</button>
+    </div>`;
+  }
+
+  v.innerHTML = h;
+}
+
+const selectAll = () => {
+  P.forEach(p => sel.add(p.id));
+  draw();
+};
+const add = () => {
+  const n = prompt('Profile name');
+  if (n) api('/profiles', 'POST', { profile_name: n, account_email: prompt('Gmail (optional)') || '' }).then(load);
+};
+const edit = id => {
+  const n = prompt('New name');
+  if (n) api('/profiles/' + id, 'PUT', { profile_name: n, account_email: prompt('Email (optional)') || '' }).then(load);
+};
+const del = id => confirm('Delete ' + id + ' and all its browser data permanently?') && api('/profiles/' + id + '?confirm=true', 'DELETE').then(load);
+const act = (id, a) => api(`/profiles/${id}/${a}`, 'POST').then(load).catch(() => {});
+const bulk = async a => {
+  if (!sel.size) return notify('Select Profiles First', 'Please check at least one profile checkbox.', '⚠️', 3000);
+  if (a === 'start') {
+    notify('Starting Profiles', `Starting ${sel.size} profiles simultaneously...`, '▶️', 4000);
+    await api('/profiles/bulk-start', 'POST', { profile_ids: [...sel] });
+  } else if (a === 'stop') {
+    notify('Stopping Profiles', `Stopping ${sel.size} profiles simultaneously...`, '⏹', 4000);
+    await api('/profiles/bulk-stop', 'POST', { profile_ids: [...sel] });
+  } else {
+    for (const id of sel) await act(id, a);
+  }
+  load();
+};
+const vv = async () => {
+  const r = await api('/video/validate', 'POST', { url: vu.value });
+  vr.textContent = r.valid ? 'Valid: ' + r.videoId : r.error;
+};
+const va = () => api('/video/assign', 'POST', { url: vu.value, profile_ids: [...sel] }).then(load);
+const vt = async id => {
+  tr.textContent = 'Running diagnostic...';
+  tr.innerHTML = `<pre class="text-xs ${card}">${JSON.stringify(await api('/video/test', 'POST', { profile_id: id }), null, 1)}</pre>`;
+};
+const sch = () => api('/settings', 'PUT', { schedule_minutes: sm.value, schedule_enabled: 'true' });
+const saveS = async () => {
+  const b = {};
+  document.querySelectorAll('[data-k]').forEach(i => b[i.dataset.k] = i.value);
+  await api('/settings', 'PUT', b);
+  notify('Settings', 'Settings saved successfully', '⚙️', 3000);
+};
+
+load();
+
+// Real-time WebSocket listener
+const ws = new WebSocket(`ws://${location.host}/ws`);
+ws.onmessage = e => {
+  const m = JSON.parse(e.data);
+  if (m.type === 'resources') {
+    R = { ...R, ...m.data };
+  } else if (m.type === 'status' && !['Settings', 'Video Testing'].includes(tab)) {
+    load();
+  }
+};
+
+// Auto-streaming loop for the live window viewer
+setInterval(() => {
+  const autoStream = document.getElementById('autoStream');
+  if (autoStream && autoStream.checked && tab === 'Dashboard') {
+    updateLivePreview();
+  }
+}, 1500);
+
+// Background status poller
+setInterval(() => {
+  if (['Profiles', 'Dashboard', 'Resources'].includes(tab)) {
+    api('/profiles').then(data => {
+      P = data;
+    }).catch(() => {});
+  }
+}, 3000);
+</script>
+</body>
+</html>
